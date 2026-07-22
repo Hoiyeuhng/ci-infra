@@ -115,9 +115,13 @@ def test_direct_amd_gpu_steps_use_dind_flag(
         assert "AMD_CI_RUNTIME" not in command_step.env
         assert command_step.env["DOCKER_IMAGE_NAME"] == amd.AMD_STABLE_CI_BASE_IMAGE
 
-    assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 6
-    assert command_step.retry["automatic"][0] == {
+    assert command_step.env["VLLM_CI_HF_HUB_MODE"] == "offline-first"
+    assert command_step.retry["automatic"] == [
+        *amd.AMD_RETRY["automatic"],
+        {"exit_status": amd.AMD_HF_HUB_RETRY_EXIT_STATUS, "limit": 1},
+    ]
+    assert len(amd.AMD_RETRY["automatic"]) == 6
+    assert amd.AMD_RETRY["automatic"][0] == {
         "signal_reason": "stack_error",
         "limit": 1,
     }
@@ -136,6 +140,56 @@ def test_direct_amd_gpu_steps_use_dind_flag(
     assert "pytest tests/foo.py" in test_commands
     assert "nvidia-smi" not in test_commands
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
+
+
+@pytest.mark.parametrize(
+    ("nightly", "torch_nightly", "expected_mode"),
+    [
+        ("0", "0", "offline-first"),
+        ("1", "0", "online"),
+        ("0", "1", "online"),
+    ],
+)
+def test_amd_hf_hub_mode_tracks_pipeline_type(
+    fake_global_config, nightly, torch_nightly, expected_mode
+):
+    fake_global_config["nightly"] = nightly
+    fake_global_config["torch_nightly"] = torch_nightly
+    step = Step(
+        label="AMD HF Hub policy",
+        group="Direct AMD",
+        device="mi300_1",
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = next(
+        rendered_step
+        for rendered_step in _render_single_step(step).steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.env["VLLM_CI_HF_HUB_MODE"] == expected_mode
+
+
+def test_amd_no_plugin_step_keeps_existing_hf_and_retry_behavior():
+    step = Step(
+        label="AMD direct command",
+        group="Direct AMD",
+        device="mi300_1",
+        no_plugin=True,
+        commands=["echo direct"],
+    )
+
+    command_step = next(
+        rendered_step
+        for rendered_step in _render_single_step(step).steps
+        if isinstance(rendered_step, buildkite_step.BuildkiteCommandStep)
+    )
+
+    assert command_step.commands != [amd.AMD_TEST_COMMAND]
+    assert command_step.commands[0].endswith("&& echo direct")
+    assert "VLLM_CI_HF_HUB_MODE" not in (command_step.env or {})
+    assert command_step.retry == amd.AMD_RETRY
 
 
 def test_amd_device_rejects_conflicting_gpu_count():
